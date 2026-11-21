@@ -113,6 +113,9 @@ export function AdminDashboardView() {
 
   const [summary, setSummary] = useState<ElectionSummary | null>(null);
   const [votes, setVotes] = useState<VoteRecord[]>([]);
+  const [storageMode, setStorageMode] = useState<'redis' | 'file' | 'tmp' | null>(
+    null
+  );
   const [loadingOverview, setLoadingOverview] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
@@ -146,6 +149,7 @@ export function AdminDashboardView() {
       const data = await fetchAdminOverview(token);
       setSummary(data.summary);
       setVotes(data.votes);
+      setStorageMode(data.storageMode ?? null);
     } catch (err) {
       setActionError(
         err instanceof Error ? err.message : 'Gagal memuat data panitia.'
@@ -498,6 +502,19 @@ export function AdminDashboardView() {
           className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800"
         >
           {actionSuccess}
+        </div>
+      )}
+
+      {storageMode === 'tmp' && (
+        <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3.5 text-xs text-amber-950">
+          <p className="font-semibold">
+            Penyimpanan Sementara Serverless Aktif (Vercel)
+          </p>
+          <p className="mt-1 leading-relaxed text-amber-900">
+            Data saat ini disimpan di direktori sementara serverless (<code>/tmp</code>) dan dapat ter-reset saat cold start. Agar data suara permanen di Vercel, tambahkan variabel lingkungan{' '}
+            <code>UPSTASH_REDIS_REST_URL</code> dan{' '}
+            <code>UPSTASH_REDIS_REST_TOKEN</code> (atau hubungkan Vercel KV), serta rutin cadangkan file Excel ke Google Drive.
+          </p>
         </div>
       )}
 

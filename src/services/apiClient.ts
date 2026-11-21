@@ -89,6 +89,7 @@ export async function loginAdminGoogle(
 export async function fetchAdminOverview(sessionToken: string): Promise<{
   summary: ElectionSummary;
   votes: VoteRecord[];
+  storageMode?: 'redis' | 'file' | 'tmp';
 }> {
   const res = await fetch('/api/admin/overview', {
     headers: { Authorization: `Bearer ${sessionToken}` },

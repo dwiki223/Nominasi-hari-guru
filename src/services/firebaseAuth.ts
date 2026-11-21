@@ -69,6 +69,27 @@ export async function signInWithGoogleDrive(): Promise<{
       accessToken: cachedAccessToken,
       idToken,
     };
+  } catch (err) {
+    const code =
+      typeof err === 'object' && err !== null && 'code' in err
+        ? String((err as { code?: unknown }).code)
+        : '';
+    if (code === 'auth/unauthorized-domain') {
+      const host =
+        typeof window !== 'undefined' ? window.location.hostname : 'domain ini';
+      throw new Error(
+        `Domain "${host}" belum didaftarkan di Firebase Authentication. Tambahkan domain Vercel Anda di Firebase Console -> Authentication -> Settings -> Authorized domains, atau masuk dengan Passcode Panitia.`
+      );
+    }
+    if (code === 'auth/popup-blocked') {
+      throw new Error(
+        'Popup login Google diblokir oleh browser. Izinkan popup untuk situs ini lalu coba lagi.'
+      );
+    }
+    if (code === 'auth/popup-closed-by-user') {
+      throw new Error('Jendela login Google ditutup sebelum proses masuk selesai.');
+    }
+    throw err;
   } finally {
     isSigningIn = false;
   }

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import {
   NOMINATIONS,
@@ -13,10 +14,15 @@ export interface VotingDatabase {
   votes: VoteRecord[];
 }
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
-const DB_PATH = path.join(DATA_DIR, 'voting-db.json');
+export type StorageMode = 'redis' | 'file' | 'tmp';
+
+const REDIS_KEY = 'nominasi_guru:voting_db:v2';
+const LOCAL_DATA_DIR = path.resolve(process.cwd(), 'data');
+const LOCAL_DB_PATH = path.join(LOCAL_DATA_DIR, 'voting-db.json');
+const TMP_DB_PATH = path.join(os.tmpdir(), 'nominasi-guru-voting-db.json');
 
 let writeLock: Promise<void> = Promise.resolve();
+let forceTmpStorage = Boolean(process.env.VERCEL);
 
 function withLock<T>(fn: () => Promise<T>): Promise<T> {
   const next = writeLock.then(fn, fn);
@@ -25,6 +31,27 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
     () => undefined
   );
   return next;
+}
+
+function getRedisConfig(): { url: string; token: string } | null {
+  const url =
+    process.env.KV_REST_API_URL?.trim() ||
+    process.env.UPSTASH_REDIS_REST_URL?.trim() ||
+    '';
+  const token =
+    process.env.KV_REST_API_TOKEN?.trim() ||
+    process.env.UPSTASH_REDIS_REST_TOKEN?.trim() ||
+    '';
+  if (url && token) {
+    return { url: url.replace(/\/+$/, ''), token };
+  }
+  return null;
+}
+
+export function getStorageMode(): StorageMode {
+  if (getRedisConfig()) return 'redis';
+  if (forceTmpStorage) return 'tmp';
+  return 'file';
 }
 
 function buildSeedDatabase(): VotingDatabase {
@@ -58,10 +85,58 @@ function buildSeedDatabase(): VotingDatabase {
   };
 }
 
-async function ensureDbExists(): Promise<VotingDatabase> {
-  await fs.mkdir(DATA_DIR, { recursive: true });
+async function readFromRedis(url: string, token: string): Promise<VotingDatabase> {
+  const res = await fetch(`${url}/get/${encodeURIComponent(REDIS_KEY)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error('Gagal membaca database Redis.');
+  }
+  const json = (await res.json()) as { result?: string | null };
+  if (typeof json.result === 'string' && json.result.length > 0) {
+    const parsed = JSON.parse(json.result) as VotingDatabase;
+    if (Array.isArray(parsed.votes)) {
+      return parsed;
+    }
+  }
+  const seed = buildSeedDatabase();
+  await writeToRedis(url, token, seed);
+  return seed;
+}
+
+async function writeToRedis(
+  url: string,
+  token: string,
+  db: VotingDatabase
+): Promise<void> {
+  const res = await fetch(`${url}/set/${encodeURIComponent(REDIS_KEY)}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(JSON.stringify(db)),
+  });
+  if (!res.ok) {
+    throw new Error('Gagal menyimpan database ke Redis.');
+  }
+}
+
+async function atomicWriteFile(targetPath: string, db: VotingDatabase): Promise<void> {
+  const dir = path.dirname(targetPath);
+  await fs.mkdir(dir, { recursive: true });
+  const tmpPath = path.join(
+    dir,
+    `${path.basename(targetPath)}.${process.pid}.${Date.now()}.tmp`
+  );
+  await fs.writeFile(tmpPath, JSON.stringify(db, null, 2), 'utf8');
+  await fs.rename(tmpPath, targetPath);
+}
+
+async function readFromFilesystem(): Promise<VotingDatabase> {
+  const activePath = forceTmpStorage ? TMP_DB_PATH : LOCAL_DB_PATH;
   try {
-    const raw = await fs.readFile(DB_PATH, 'utf8');
+    const raw = await fs.readFile(activePath, 'utf8');
     const parsed = JSON.parse(raw) as VotingDatabase;
     if (!Array.isArray(parsed.votes)) {
       throw new Error('Invalid DB schema');
@@ -69,16 +144,35 @@ async function ensureDbExists(): Promise<VotingDatabase> {
     return parsed;
   } catch {
     const seed = buildSeedDatabase();
-    await atomicWriteDb(seed);
+    await writeToFilesystem(seed);
     return seed;
   }
 }
 
-async function atomicWriteDb(db: VotingDatabase): Promise<void> {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  const tmpPath = path.join(DATA_DIR, `voting-db.${process.pid}.${Date.now()}.tmp`);
-  await fs.writeFile(tmpPath, JSON.stringify(db, null, 2), 'utf8');
-  await fs.rename(tmpPath, DB_PATH);
+async function writeToFilesystem(db: VotingDatabase): Promise<void> {
+  if (forceTmpStorage) {
+    await atomicWriteFile(TMP_DB_PATH, db);
+    return;
+  }
+  try {
+    await atomicWriteFile(LOCAL_DB_PATH, db);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EROFS' || code === 'EACCES' || code === 'EPERM') {
+      forceTmpStorage = true;
+      await atomicWriteFile(TMP_DB_PATH, db);
+    } else {
+      throw err;
+    }
+  }
+}
+
+async function ensureDbExists(): Promise<VotingDatabase> {
+  const redis = getRedisConfig();
+  if (redis) {
+    return readFromRedis(redis.url, redis.token);
+  }
+  return readFromFilesystem();
 }
 
 export async function readDb(): Promise<VotingDatabase> {
@@ -89,9 +183,14 @@ export async function mutateDb<T>(
   mutator: (db: VotingDatabase) => Promise<T> | T
 ): Promise<T> {
   return withLock(async () => {
+    const redis = getRedisConfig();
     const db = await ensureDbExists();
     const result = await mutator(db);
-    await atomicWriteDb(db);
+    if (redis) {
+      await writeToRedis(redis.url, redis.token, db);
+    } else {
+      await writeToFilesystem(db);
+    }
     return result;
   });
 }
